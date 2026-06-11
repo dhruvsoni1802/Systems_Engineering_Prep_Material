@@ -1,0 +1,71 @@
+CUSTOM MEMORY ALLOCATOR — What this code does and why
+=======================================================
+
+THE PROBLEM IT SOLVES
+----------------------
+malloc() and free() don't come from thin air. Someone has to ask the OS
+for memory and manage handing it out in small pieces. This code does that.
+
+
+THE BIG IDEA
+------------
+Ask the OS for one big chunk upfront. Then manage it yourself.
+Never go back to the OS for every little allocation — that's too slow.
+
+
+HOW WE GET MEMORY FROM THE OS
+-------------------------------
+mmap() — we ask the OS for 1MB of raw memory in one shot.
+It gives us a pointer to the start. That's it. No structure, no tracking.
+Just bytes. We impose structure on it ourselves.
+
+
+THE BLOCK HEADER
+-----------------
+Every piece of memory we hand out has a secret header just before it.
+The header stores:
+  - data_size  : how big is the user's chunk
+  - free       : is this block available or in use
+  - next_block : pointer to the next block (linked list)
+
+When the user calls custom_malloc(64), they get a pointer.
+What's actually sitting just before that pointer is the header.
+When they call custom_free(ptr), we step back by HEADER_SIZE to find it.
+
+
+HOW MALLOC WORKS
+-----------------
+The entire 1MB starts as ONE giant free block.
+custom_malloc walks the linked list looking for a free block big enough.
+When it finds one:
+  1. If the block is much bigger than needed — SPLIT it.
+     Create a new smaller block for the remainder and link it in.
+  2. Mark it as not free.
+  3. Return pointer past the header.
+
+Splitting is important. Without it, a 64-byte request consumes
+the entire 1MB block and nothing else can be allocated.
+
+
+HOW FREE WORKS
+---------------
+custom_free steps back to find the header, marks it free.
+Then it walks the entire list and COALESCES — merges any two adjacent
+free blocks into one bigger free block.
+
+Why coalesce? Without it, after many alloc/free cycles you end up with
+hundreds of tiny free blocks that can never satisfy a larger request.
+Merging rebuilds usable space.
+
+
+ALIGN MACRO
+------------
+Every size gets rounded up to the nearest 16 bytes.
+This keeps every pointer on a 16-byte boundary.
+Unaligned pointers can crash on some CPUs or silently slow things down.
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+Ask OS for 1MB once, track every block with a header,
+split on alloc and merge on free.

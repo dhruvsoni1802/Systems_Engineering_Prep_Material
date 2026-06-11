@@ -1,0 +1,101 @@
+IN-MEMORY KEY-VALUE STORE — What this code does and why
+=========================================================
+
+THE PROBLEM IT SOLVES
+----------------------
+You need a hash map that many threads read from and occasionally write to.
+A plain mutex serializes everyone — even readers who could safely run together.
+A readers-writer lock fixes that. Many readers at once, one writer at a time.
+
+
+THE BIG IDEA
+------------
+Hash map for fast lookups. Per-bucket locking so threads on different
+buckets never block each other. Readers-writer lock so reads don't
+block each other, only writes block everyone.
+
+
+THE STRUCTURE — THREE LAYERS
+------------------------------
+entry_t   — one key-value pair, with a next pointer (linked list node)
+bucket_t  — one slot in the array, holds a linked list + its own rwlock
+hashmap_t — the array of 16 buckets
+
+Visually:
+  buckets[0] → ("vm-1","running") → ("vm-9","stopped") → NULL
+  buckets[1] → NULL
+  buckets[2] → ("vm-2","paused") → NULL
+  ...
+
+
+THE HASH FUNCTION
+------------------
+Takes a string key, returns a number between 0 and 15 (bucket index).
+Can use functions such as djb2
+
+
+COLLISIONS — WHEN TWO KEYS MAP TO THE SAME BUCKET
+---------------------------------------------------
+We just append to the linked list in that bucket.
+On lookup we walk the list comparing keys with strcmp.
+This is called chaining. Simple and correct.
+
+
+THE READERS-WRITER LOCK — THE CORE CONCEPT
+--------------------------------------------
+pthread_rwlock_rdlock() — shared lock.
+  Multiple threads can hold this at the same time.
+  Use this in get() — reads don't conflict with each other.
+
+pthread_rwlock_wrlock() — exclusive lock.
+  Only one thread can hold this. Blocks everyone else.
+  Use this in put() and delete() — writes must be isolated.
+
+pthread_rwlock_unlock() — releases whichever lock you held.
+
+
+WHY ONE LOCK PER BUCKET (NOT ONE FOR THE WHOLE MAP)
+-----------------------------------------------------
+This is called lock striping.
+If T1 writes to bucket 3 and T2 reads from bucket 7 — no conflict.
+They touch different buckets, different locks, run in parallel.
+One global lock would make them wait even though they're doing
+completely unrelated work.
+
+
+HOW PUT WORKS
+--------------
+1. Hash the key to find the bucket.
+2. Write-lock that bucket.
+3. Walk the list — if key exists, update the value and return.
+4. If not found, malloc a new entry and prepend it to the head.
+5. Unlock.
+
+We prepend to head because it's O(1). Order doesn't matter in a hash map.
+
+
+HOW GET WORKS
+--------------
+1. Hash the key to find the bucket.
+2. READ-lock that bucket (not write — multiple readers are fine).
+3. Walk the list comparing keys.
+4. Copy value into the output buffer if found.
+5. Unlock.
+
+The output buffer pattern (pass char *out_val, return 0 or 1) is important.
+We can't return a pointer to the entry — another thread could delete it
+the moment we release the lock. Copy the value out while holding the lock.
+
+
+THE CRITICAL RULE FOR ALL OPERATIONS
+--------------------------------------------
+Always unlock on every exit path. If you find the key early and return,
+unlock before returning. If you don't find it, unlock at the end.
+Forgetting one unlock = deadlock. The whole program freezes silently.
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+Hash the key to a bucket, take a reader or writer lock on just that bucket,
+do the operation, unlock — multiple threads can work on different buckets
+simultaneously, and multiple readers can read the same bucket at the same time.

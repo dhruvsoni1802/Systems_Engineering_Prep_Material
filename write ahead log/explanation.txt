@@ -1,0 +1,107 @@
+WRITE-AHEAD LOG (WAL) — What this code does and why
+=====================================================
+
+THE PROBLEM IT SOLVES
+----------------------
+You run an operation on data. Power dies halfway through.
+Your data is now in an unknown state. How do you recover?
+
+Answer: before executing anything, write what you're ABOUT to do
+to a log file and force it to disk. On restart, replay the log.
+Nothing is ever lost.
+
+
+THE BIG IDEA
+------------
+The log is the source of truth. Not the in-memory state.
+If it's in the log — it happened. If it's not — it didn't.
+On startup, always replay the log first.
+
+
+THE THREE FIELDS THAT MATTER
+------------------------------
+wal_t has three things:
+  file      — the log file, opened in append mode ("a")
+              append mode means we never overwrite old entries,
+              we only ever add to the end
+  next_lsn  — log sequence number, starts at 1, increments forever
+              this is how you know entry 5 came after entry 4
+              on recovery, scan for the highest LSN and continue from there
+  lock      — mutex so two threads never write at the same time
+              interleaved writes corrupt every entry they touch
+
+
+WHAT EACH LOG LINE LOOKS LIKE ON DISK
+---------------------------------------
+  1|1700000001|PUT|vm-1|running
+  2|1700000001|PUT|vm-2|stopped
+  3|1700000001|DELETE|vm-2|
+
+  format: LSN | timestamp | operation | key | value
+
+Human readable. You can inspect it with cat.
+Easy to parse line by line on recovery.
+
+
+WHY fflush AND fsync — THE MOST IMPORTANT THING TO KNOW
+---------------------------------------------------------
+Just calling fprintf() is NOT durable. Two buffers stand between
+your code and the physical disk:
+
+  fprintf()  ->  data sits in stdio's internal buffer  (not even in OS yet)
+  fflush()   ->  moves data from stdio buffer into the OS page cache
+  fsync()    ->  forces OS to push page cache to physical disk
+
+Power can die after fflush but before fsync — data is gone.
+You need BOTH calls. Every time. After every write.
+This is slow. That's the price of durability. Every database pays it.
+
+
+HOW wal_write WORKS
+---------------------
+1. Lock — one writer at a time, no interleaving
+2. Write the formatted line with LSN, timestamp, op, key, val
+3. fflush — push out of stdio
+4. fsync  — push to disk
+5. Unlock
+
+
+HOW wal_recover WORKS
+-----------------------
+Open the log file and read it line by line.
+In this code we just print each line.
+
+In a real system you would:
+  parse the op field — PUT or DELETE
+  apply it to your in-memory data structure
+  track the highest LSN — that's where next_lsn restarts
+
+The interviewer knows this. Say it out loud. You don't need to code it.
+
+
+WHY A MUTEX AND NOT A RWLOCK
+------------------------------
+The log is write-only in the hot path. There are no concurrent readers.
+A mutex is the right and simple choice here.
+The only thing we're protecting against is two threads writing
+at the same time and corrupting each other's log lines.
+
+
+THE CONNECTION TO DISTRIBUTED SYSTEMS
+---------------------------------------
+In Raft (the algorithm behind etcd, CockroachDB, Kubernetes state):
+  - Every write goes to the leader's WAL first
+  - Leader replicates the WAL entry to follower nodes
+  - Once a majority have written it to their WAL, it's committed
+  - Only then is it applied to actual state
+
+The WAL is not just crash recovery.
+In distributed systems, the WAL IS the replication unit.
+What we wrote here is the local version of exactly that mechanism.
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+Write what you're about to do to a log file, fflush and fsync
+to guarantee it hits disk, then execute — on restart, replay
+the log line by line to reconstruct exact state.

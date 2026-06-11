@@ -1,0 +1,416 @@
+SYSTEM CALLS CHEAT SHEET
+=========================
+Format: syscall → what it does → when you'd use it → simple example
+
+
+════════════════════════════════════════════
+SOCKET PROGRAMMING
+════════════════════════════════════════════
+
+socket(domain, type, protocol)
+  What:     Creates a new communication endpoint, returns a file descriptor
+  When:     First thing you call to start any network server or client
+  Example:
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            // AF_INET = IPv4, SOCK_STREAM = TCP, 0 = default protocol
+            // fd is now just an integer like 5 — kernel tracks the rest
+
+
+bind(fd, addr, addrlen)
+  What:     Attaches a socket to a specific IP address and port
+  When:     Server side only — claim the port you want to listen on
+  Example:
+            struct sockaddr_in addr = {
+                .sin_family      = AF_INET,
+                .sin_port        = htons(8080),   // host to network byte order
+                .sin_addr.s_addr = INADDR_ANY     // accept on all interfaces
+            };
+            bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+
+
+listen(fd, backlog)
+  What:     Marks the socket as passive — ready to accept incoming connections
+  When:     Server side, after bind, before accept
+  Example:
+            listen(fd, 128);
+            // 128 = how many connections the kernel queues before you call accept
+            // NOT the max number of clients — just the waiting queue size
+
+
+accept(fd, addr, addrlen)
+  What:     Pulls the next connection from the queue, returns a NEW fd for that client
+  When:     Server side, inside your event loop — one call per client
+  Example:
+            int client_fd = accept(listen_fd, NULL, NULL);
+            // listen_fd stays open for more connections
+            // client_fd is a brand new fd just for this one client
+            // with 1000 clients you have 1001 fds open (1 listen + 1000 clients)
+
+
+connect(fd, addr, addrlen)
+  What:     Initiates a TCP connection to a remote server
+  When:     Client side — you know the server IP and port
+  Example:
+            struct sockaddr_in server = {
+                .sin_family = AF_INET,
+                .sin_port   = htons(8080)
+            };
+            inet_pton(AF_INET, "127.0.0.1", &server.sin_addr);
+            connect(fd, (struct sockaddr *)&server, sizeof(server));
+
+
+setsockopt(fd, level, optname, optval, optlen)
+  What:     Sets options on a socket — behavior tuning
+  When:     Right after socket(), before bind() — avoid "address already in use"
+  Example:
+            int opt = 1;
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            // Without this, restarting the server within ~60 seconds fails
+            // because the port sits in TIME_WAIT state
+
+
+send(fd, buf, len, flags) / recv(fd, buf, len, flags)
+  What:     Send/receive data on a socket (like write/read but socket-specific)
+  When:     When you want socket-specific flags (MSG_DONTWAIT, MSG_PEEK etc.)
+  Example:
+            send(client_fd, "hello", 5, 0);    // 0 = no special flags
+            char buf[64];
+            int n = recv(client_fd, buf, sizeof(buf), 0);
+
+
+════════════════════════════════════════════
+FILE DESCRIPTORS AND I/O
+════════════════════════════════════════════
+
+read(fd, buf, count)
+  What:     Reads up to count bytes from fd into buf, returns bytes actually read
+  When:     Reading from any fd — socket, file, pipe, stdin
+  Example:
+            char buf[1024];
+            int n = read(client_fd, buf, sizeof(buf));
+            // n > 0  → got data
+            // n == 0 → connection closed (EOF)
+            // n == -1, errno == EAGAIN → no data right now (non-blocking)
+            // n == -1, other errno    → real error
+
+
+write(fd, buf, count)
+  What:     Writes count bytes from buf to fd, returns bytes actually written
+  When:     Writing to any fd — socket, file, stdout
+  Example:
+            int n = write(client_fd, buf, len);
+            // IMPORTANT: n might be less than len
+            // in production you loop until all bytes are sent
+
+
+open(path, flags, mode)
+  What:     Opens a file, returns a fd
+  When:     Any time you need to read from or write to a file
+  Example:
+            int fd = open("wal.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+            // O_WRONLY = write only
+            // O_CREAT  = create if doesn't exist
+            // O_APPEND = always write to end (important for logs)
+            // 0644     = file permissions (owner rw, others r)
+
+
+close(fd)
+  What:     Releases a file descriptor — tells kernel you're done with it
+  When:     Always — every fd you open must be closed or you leak resources
+  Example:
+            close(client_fd);
+            // After this the fd number can be reused by the kernel
+            // Forgetting to close = fd leak = server eventually crashes
+
+
+fflush(stream)
+  What:     Flushes stdio's internal buffer to the OS
+  When:     Before fsync — stdio buffers writes in userspace first
+  Example:
+            fflush(wal->file);
+            // fprintf writes to a userspace buffer
+            // fflush pushes that buffer into the OS page cache
+            // data is still NOT on disk yet after this
+
+
+fsync(fd)
+  What:     Forces OS to write its page cache to physical disk
+  When:     After fflush — guarantees durability, not just OS buffering
+  Example:
+            fsync(fileno(wal->file));
+            // fileno() gets the raw fd from a FILE* pointer
+            // after this call, data is on physical disk
+            // power can die and data survives
+            // BOTH fflush and fsync are required for true durability
+
+
+fcntl(fd, cmd, arg)
+  What:     Controls file descriptor properties — get/set flags
+  When:     Making a socket non-blocking for use with epoll
+  Example:
+            int flags = fcntl(fd, F_GETFL, 0);       // get current flags
+            fcntl(fd, F_SETFL, flags | O_NONBLOCK);  // add non-blocking flag
+            // after this, read() returns EAGAIN instead of blocking
+            // required before registering with epoll in edge-triggered mode
+
+
+════════════════════════════════════════════
+EPOLL
+════════════════════════════════════════════
+
+epoll_create1(flags)
+  What:     Creates a new epoll instance, returns a fd
+  When:     Once at server startup — this is your event notification system
+  Example:
+            int epfd = epoll_create1(0);
+            // epfd is itself a file descriptor
+            // pass 0 for flags unless you need EPOLL_CLOEXEC
+
+
+epoll_ctl(epfd, op, fd, event)
+  What:     Add, modify, or remove a fd from epoll's watch list
+  When:     Every time you get a new client fd (ADD) or close one (DEL)
+  Example:
+            struct epoll_event ev;
+            ev.events  = EPOLLIN | EPOLLET;  // watch for readable, edge-triggered
+            ev.data.fd = client_fd;          // this comes back to you on event
+
+            epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &ev);  // start watching
+            epoll_ctl(epfd, EPOLL_CTL_DEL, client_fd, NULL); // stop watching
+
+
+epoll_wait(epfd, events, maxevents, timeout)
+  What:     Blocks until one or more watched fds are ready, returns only ready ones
+  When:     The core of your event loop — called every iteration
+  Example:
+            struct epoll_event events[64];
+            int n = epoll_wait(epfd, events, 64, -1);
+            // -1 timeout = block forever until something is ready
+            // n = number of ready events (NOT total watched fds)
+            // only iterate n times — the rest of the array is garbage
+            for (int i = 0; i < n; i++) {
+                int fd = events[i].data.fd;
+                // handle fd
+            }
+
+
+════════════════════════════════════════════
+MEMORY
+════════════════════════════════════════════
+
+mmap(addr, length, prot, flags, fd, offset)
+  What:     Asks the OS for a chunk of virtual memory, returns a pointer
+  When:     Building a custom allocator, mapping a file into memory
+  Example:
+            void *mem = mmap(NULL, 1024 * 1024,
+                             PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS,
+                             -1, 0);
+            // NULL   = let OS choose the address
+            // PROT_READ | PROT_WRITE = we can read and write it
+            // MAP_ANONYMOUS = not backed by a file, just raw memory
+            // -1, 0  = no file descriptor needed for anonymous mapping
+
+
+munmap(addr, length)
+  What:     Releases memory previously obtained from mmap back to the OS
+  When:     Cleanup — when your arena or allocator is destroyed
+  Example:
+            munmap(mem, 1024 * 1024);
+            // length must match what you passed to mmap
+            // after this the memory address is invalid
+
+
+════════════════════════════════════════════
+PROCESSES
+════════════════════════════════════════════
+
+fork()
+  What:     Creates an exact copy of the current process
+  When:     Spawning a child process to handle work independently
+  Example:
+            pid_t pid = fork();
+            if (pid == 0) {
+                // this is the child process
+                // pid == 0 means "I am the child"
+            } else {
+                // this is the parent
+                // pid = child's process ID
+            }
+
+
+exec(path, argv, envp)  [execv, execve, execvp variants]
+  What:     Replaces the current process image with a new program
+  When:     After fork() in the child — run a different program
+  Example:
+            // in child after fork:
+            char *args[] = { "/bin/ls", "-la", NULL };
+            execv("/bin/ls", args);
+            // after exec, this code no longer exists in memory
+            // the child is now running /bin/ls
+            // if exec returns, it failed
+
+
+waitpid(pid, status, options)
+  What:     Parent waits for a specific child process to finish
+  When:     After fork() in the parent — reap the child, avoid zombies
+  Example:
+            int status;
+            waitpid(pid, &status, 0);
+            if (WIFEXITED(status))
+                printf("child exited with %d\n", WEXITSTATUS(status));
+
+
+getpid() / getppid()
+  What:     Returns current process ID / parent process ID
+  When:     Logging, debugging, writing PID files for process management
+  Example:
+            printf("my pid: %d, parent pid: %d\n", getpid(), getppid());
+
+
+════════════════════════════════════════════
+THREADS
+════════════════════════════════════════════
+
+pthread_create(thread, attr, fn, arg)
+  What:     Creates a new thread that runs fn(arg)
+  When:     Spawning a producer, consumer, or worker thread
+  Example:
+            pthread_t tid;
+            pthread_create(&tid, NULL, worker_fn, (void *)my_arg);
+            // NULL attr = default stack size and scheduling
+            // thread runs worker_fn(my_arg) concurrently
+
+
+pthread_join(thread, retval)
+  What:     Waits for a thread to finish, cleans it up
+  When:     Main thread waiting for workers to complete before exiting
+  Example:
+            pthread_join(tid, NULL);
+            // NULL = don't care about return value
+            // without this, main() exits and kills all threads
+
+
+pthread_mutex_lock(mutex) / pthread_mutex_unlock(mutex)
+  What:     Acquire / release exclusive lock on a mutex
+  When:     Protecting any shared data structure from concurrent modification
+  Example:
+            pthread_mutex_lock(&rb->lock);
+            rb->count++;                   // safe — only one thread here
+            pthread_mutex_unlock(&rb->lock);
+            // ALWAYS unlock on every exit path — missing one = deadlock
+
+
+pthread_cond_wait(cond, mutex)
+  What:     Atomically releases mutex and sleeps until cond is signaled
+  When:     Consumer waiting for data, producer waiting for space
+  Example:
+            // ALWAYS use while, never if — spurious wakeups happen
+            while (rb->count == 0)
+                pthread_cond_wait(&rb->not_empty, &rb->lock);
+            // on wakeup: mutex is reacquired automatically
+            // while loop rechecks condition before proceeding
+
+
+pthread_cond_signal(cond) / pthread_cond_broadcast(cond)
+  What:     Wakes one / all threads sleeping on a condition variable
+  When:     After changing shared state — tell waiters something changed
+  Example:
+            rb->count++;
+            pthread_cond_signal(&rb->not_empty);  // wake one consumer
+            // broadcast wakes ALL waiting threads — use when any of them
+            // could proceed (e.g. multiple consumers, one item added)
+
+
+pthread_rwlock_rdlock(rwlock) / pthread_rwlock_wrlock(rwlock)
+  What:     Acquire shared (read) or exclusive (write) lock
+  When:     Data read far more than written — readers don't block each other
+  Example:
+            pthread_rwlock_rdlock(&bucket->lock);  // many readers OK
+            // ... read shared data ...
+            pthread_rwlock_unlock(&bucket->lock);
+
+            pthread_rwlock_wrlock(&bucket->lock);  // exclusive
+            // ... modify shared data ...
+            pthread_rwlock_unlock(&bucket->lock);
+
+
+════════════════════════════════════════════
+SIGNALS
+════════════════════════════════════════════
+
+signal(signum, handler) / sigaction(signum, act, oldact)
+  What:     Register a function to call when a signal arrives
+  When:     Graceful shutdown on Ctrl+C, ignoring broken pipe errors
+  Example:
+            void handle_sigint(int sig) {
+                printf("shutting down...\n");
+                running = 0;   // tell event loop to stop
+            }
+            signal(SIGINT, handle_sigint);
+            // SIGPIPE is important for servers: when client disconnects
+            // and you write to it, OS sends SIGPIPE which kills your process
+            signal(SIGPIPE, SIG_IGN);  // ignore it, handle via write() error
+
+
+════════════════════════════════════════════
+TIME
+════════════════════════════════════════════
+
+time(t)
+  What:     Returns current Unix timestamp (seconds since Jan 1 1970)
+  When:     Timestamping log entries, measuring elapsed time roughly
+  Example:
+            uint64_t ts = (uint64_t)time(NULL);
+            // NULL = don't store result in a pointer, just return it
+
+
+sleep(seconds) / usleep(microseconds)
+  What:     Pause the current thread for a duration
+  When:     Control loops — poll every N seconds, retry backoff
+  Example:
+            sleep(1);          // sleep 1 second
+            usleep(100000);    // sleep 100ms (100,000 microseconds)
+            // in a monitoring loop: check state, sleep, check again
+
+
+════════════════════════════════════════════
+QUICK REFERENCE — ONE LINERS
+════════════════════════════════════════════
+
+socket()          create a communication endpoint
+bind()            attach socket to IP:port
+listen()          mark socket as ready to accept connections
+accept()          pull next client from queue, get new fd
+connect()         client connects to a server
+send()/recv()     socket-specific read/write with flags
+
+read()            read bytes from any fd
+write()           write bytes to any fd
+open()            open a file, get a fd
+close()           release a fd — always do this
+fflush()          push stdio buffer to OS
+fsync()           push OS page cache to disk — true durability
+fcntl()           get/set fd properties (non-blocking flag)
+
+epoll_create1()   create epoll instance
+epoll_ctl()       add/modify/remove fd from watch list
+epoll_wait()      block until fds are ready, return only ready ones
+
+mmap()            get raw memory from OS
+munmap()          return memory to OS
+
+fork()            clone current process
+exec()            replace process with new program
+waitpid()         wait for child process, reap it
+
+pthread_create()        spawn a thread
+pthread_join()          wait for thread, clean it up
+pthread_mutex_lock()    exclusive lock
+pthread_mutex_unlock()  release lock
+pthread_cond_wait()     sleep until condition changes (releases mutex)
+pthread_cond_signal()   wake one sleeping thread
+
+time()            unix timestamp in seconds
+sleep()/usleep()  pause thread for duration
+signal()          register handler for OS signals

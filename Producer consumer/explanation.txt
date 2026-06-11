@@ -1,0 +1,87 @@
+RING BUFFER — What this code does and why
+==========================================
+
+THE PROBLEM IT SOLVES
+----------------------
+Two threads. One produces data. One consumes data.
+They need to pass messages without stepping on each other.
+A ring buffer is the standard way to do this safely and efficiently.
+
+
+THE BIG IDEA
+------------
+A fixed array that wraps around. Producer adds to the tail.
+Consumer takes from the head. When you hit the end, you wrap to the start.
+No shifting, no reallocation. Same memory, forever.
+
+
+WHY CIRCULAR
+-------------
+Instead of a flat queue that needs shifting, indices just wrap:
+  tail = (tail + 1) % CAPACITY
+
+So slot 9 is followed by slot 0. It's circular. Hence ring buffer.
+
+
+THE THREE SYNCHRONIZATION TOOLS
+---------------------------------
+mutex    — only one thread touches head/tail/count at a time.
+           Without this, both threads could modify count simultaneously
+           and corrupt it.
+
+cond "full"  — consumer waits here when buffer is empty.
+               Producer signals it after adding an item.
+
+cond "empty" — producer waits here when buffer is full.
+               Consumer signals it after removing an item.
+
+Note: the naming in this code is from the consumer/producer perspective.
+"full" means "wait for something to be in it", "empty" means "wait for space."
+
+
+HOW ENQUEUE WORKS
+------------------
+Lock the mutex.
+If count == CAPACITY, we're full — wait on the "empty" cond var.
+  (waiting releases the lock so the consumer can run)
+Write value to buffer[tail], advance tail, increment count.
+Signal "full" — wake up any sleeping consumer.
+Unlock.
+
+
+HOW DEQUEUE WORKS
+------------------
+Lock the mutex.
+If count == 0, we're empty — wait on the "full" cond var.
+  (waiting releases the lock so the producer can run)
+Read value from buffer[head], advance head, decrement count.
+Signal "empty" — wake up any sleeping producer.
+Unlock.
+
+
+THE WHILE LOOP AROUND COND_WAIT — IMPORTANT
+--------------------------------------------
+We use while, not if.
+Condition variables can have spurious wakeups — the thread wakes up
+even though nothing actually changed. The while loop rechecks and goes
+back to sleep if the condition isn't actually true yet.
+Always while, never if.
+
+
+HOW COND_WAIT WORKS INTERNALLY
+--------------------------------
+pthread_cond_wait does three things atomically:
+  1. Releases the mutex
+  2. Puts the thread to sleep
+  3. Reacquires the mutex when woken up
+
+If it released the mutex first then slept separately, the other thread
+could signal between those two steps and the signal would be missed.
+That's why it's one atomic operation.
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+Fixed circular array, mutex protects head/tail/count,
+two condition variables let producer and consumer sleep
+instead of spinning when the buffer is full or empty.

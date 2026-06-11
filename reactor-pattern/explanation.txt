@@ -1,0 +1,57 @@
+REACTOR PATTERN — What this code does and why
+================================================
+
+THE PROBLEM IT SOLVES
+----------------------
+You have a server. Many clients connect to it. You can't create a thread
+for every client — too expensive. So instead, one thread handles all of
+them by reacting to events as they happen.
+
+
+THE BIG IDEA
+------------
+Don't go looking for work. Let the OS tell you when work arrives.
+That's the reactor pattern.
+
+
+HOW THE CODE WORKS — IN ORDER
+-------------------------------
+1. We create a server socket — this is just a door clients knock on.
+   bind() gives it an address. listen() says "start accepting knocks."
+
+2. We create an epoll instance. Think of epoll as a notification system.
+   We tell it: "watch this socket, wake me up when something happens."
+
+3. We enter the event loop — while(1). We call epoll_wait() which
+   blocks until at least one socket has activity. It returns ONLY the
+   sockets that are ready. Not all of them. Just the active ones.
+
+4. For each ready socket we check: is it the listener?
+   - YES → a new client is connecting. Call accept(), get a new fd,
+           register that new client with epoll too.
+   - NO  → an existing client sent data. Read it, echo it back.
+
+
+THE TWO HANDLERS
+-----------------
+handle_client_connection — someone knocked. Open the door, note their fd.
+handle_client_data       — someone is talking. Read until they stop (EAGAIN)
+                           or disconnect (n == 0).
+
+
+WHY EPOLLET (EDGE TRIGGERED)
+------------------------------
+Without it, epoll wakes you up repeatedly as long as data sits in the buffer.
+With it, epoll wakes you up ONCE when new data arrives.
+That's why we read in a while loop until EAGAIN — we must drain everything
+in one shot because epoll won't remind us again.
+
+
+EAGAIN means "no more data right now" — not an error. It's the socket's
+way of saying "I'm done for now, come back later."
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+epoll watches all sockets, wakes us only when something happens,
+we handle it and go back to waiting.

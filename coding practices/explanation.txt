@@ -1,0 +1,267 @@
+SEGFAULTS, UNDEFINED BEHAVIOUR, SANITIZERS, GDB
+================================================
+
+THE PROBLEM IT SOLVES
+----------------------
+C gives you direct access to memory. No runtime holds your hand.
+When something goes wrong — wrong pointer, wrong size, wrong bounds —
+the program either crashes silently, corrupts memory quietly, or
+produces wrong results with no warning. You need tools to find where
+and why.
+
+
+THE BIG IDEA
+------------
+Compile with sanitizers to catch bugs at runtime with exact line numbers.
+When the program crashes without sanitizers, use GDB to inspect the
+call stack and memory at the moment of crash.
+
+
+HOW TO USE SANITIZERS
+----------------------
+Compile with:
+    gcc -g -fsanitize=address,undefined -o prog prog.c
+
+When it fires, read two things only:
+1. The first line — the category of bug (heap-buffer-overflow,
+   heap-use-after-free, stack-buffer-overflow, global-buffer-overflow).
+   This tells you what class of mistake to look for before opening code.
+
+2. The call stack — read bottom-up. Skip frame #0 if it is inside a
+   library. Your code starts at #1. The filename and line number there
+   is where you go first.
+
+Everything else in the output is noise for most debugging sessions.
+
+
+HOW TO USE GDB
+---------------
+Compile with -g (debug symbols), then:
+    gdb ./prog
+    (gdb) run          — runs the program
+    (gdb) backtrace    — shows call stack at point of crash
+    (gdb) frame N      — jump to frame N in the call stack
+    (gdb) print var    — inspect the value of a variable
+    (gdb) list         — show source code around current line
+    (gdb) break func   — set a breakpoint at a function
+
+Even when the program does not crash, use breakpoints and print to
+verify your data matches your expectations at each step. Correct-looking
+output is not proof of correct code.
+
+
+SANITIZER LIMITATIONS
+----------------------
+ASan does not catch every overflow. malloc aligns allocations to 8 or 16
+byte boundaries. A small overflow can land in alignment padding rather
+than the redzone, and ASan never fires. Always verify malloc size
+calculations manually regardless of what the sanitizer reports.
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+Sanitizers tell you the category and location of a bug automatically.
+GDB lets you inspect state manually when sanitizers are not available
+or when the program produces wrong results without crashing.
+
+
+
+
+COMPILING MULTIPLE .c AND .h FILES
+====================================
+
+THE PROBLEM IT SOLVES
+----------------------
+Real programs are split across many files. The compiler processes each
+.c file independently. The linker stitches them together at the end.
+Without understanding this boundary, you get errors that look cryptic
+but have simple root causes.
+
+
+THE BIG IDEA
+------------
+Each .c file is a translation unit. A .h file is an interface contract —
+it tells other translation units what exists, not what it does.
+Definitions (the actual code) live in .c files. Declarations (the
+signatures) live in .h files.
+
+
+THE RULES
+----------
+1. DECLARATION vs DEFINITION
+   Declaration — tells the compiler a function or variable exists.
+   Definition  — provides the actual body or storage.
+   Headers declare. Source files define.
+
+2. HEADER GUARDS — mandatory in every header.
+   Without them, if two files include the same header, the compiler sees
+   duplicate declarations in the same translation unit.
+
+       #ifndef MY_HEADER_H
+       #define MY_HEADER_H
+       ... declarations ...
+       #endif
+
+3. EXTERN for shared globals — declare in the header with extern,
+   define in exactly one .c file. Without extern every translation unit
+   that includes the header creates its own copy.
+
+
+THE TWO LINKER ERRORS YOU WILL SEE
+------------------------------------
+"undefined reference to foo"
+   — you declared foo but never defined it, or forgot to pass the
+     .c or .o file to the linker.
+
+"multiple definition of foo"
+   — you put a function body or variable definition in a header.
+     Every .c that includes it provides a definition and the linker
+     finds duplicates.
+
+
+HOW TO COMPILE
+---------------
+Separately then link:
+    gcc -c utils.c -o utils.o
+    gcc -c main.c  -o main.o
+    gcc utils.o main.o -o prog
+
+Or in one shot:
+    gcc main.c utils.c -o prog
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+Headers declare, source files define, header guards prevent duplicate
+declarations, and the linker fails loudly when you mix these up.
+
+
+
+
+MAN PAGES
+==========
+
+THE PROBLEM IT SOLVES
+----------------------
+Nobody memorises every argument to every system call. mmap takes 6
+arguments, sigaction takes a struct, open has an optional third argument.
+The man page is the intended reference — using it is not a weakness,
+it is correct engineering practice.
+
+
+THE BIG IDEA
+------------
+Every system call and library function has a man page. It is structured
+the same way every time. You only need to read two or three sections to
+get what you need.
+
+
+THE SECTION NUMBERS
+--------------------
+man 1  — shell commands
+man 2  — system calls  (open, mmap, fork, read, write)
+man 3  — library functions  (malloc, printf, pthread_create, strdup)
+man 7  — concept overviews  (socket, signal, pipe, mmap)
+
+When in doubt about which section, try 2 first for low-level calls,
+3 for anything from libc.
+
+
+HOW TO READ A MAN PAGE QUICKLY
+--------------------------------
+Read these sections in order and stop when you have enough:
+
+1. SYNOPSIS   — exact function signature and which headers to include.
+2. DESCRIPTION — first two paragraphs cover 90% of normal usage.
+3. RETURN VALUE — what success and failure look like, when errno is set.
+4. ERRORS     — which errno values you need to handle.
+
+Skip everything else unless you are debugging something unusual.
+
+
+READING THE SYNOPSIS SYNTAX
+-----------------------------
+Some man pages use a newer style with a semicolon before the arguments:
+
+    void *mmap(size_t length;
+               void addr[length], size_t length, ...);
+
+The part before the semicolon is a forward declaration so that array
+notation like addr[length] is valid syntax. Ignore it. Read only the
+argument list after the semicolon — those are the actual parameters.
+
+When you see ... in a synopsis, look for the comment next to it.
+It tells you the type and name of the optional argument and when it
+is required.
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+Open the man page, read SYNOPSIS for the signature, DESCRIPTION for
+usage, RETURN VALUE for error handling — everything you need is in
+those three sections.
+
+
+
+
+WRITING TEST CASES WITH ASSERT
+================================
+
+THE PROBLEM IT SOLVES
+----------------------
+You need to verify your code is correct without setting up a test
+framework. In an interview you have no external libraries. You need
+a way to write tests that are self-contained, readable, and fail loudly
+with useful output.
+
+
+THE BIG IDEA
+------------
+assert() from <assert.h> aborts the program with a diagnostic message
+if a condition is false. A thin macro wrapper lets you keep running
+after failures and see all broken cases at once.
+
+
+THE TWO TOOLS
+--------------
+1. assert() — simplest form, aborts on failure.
+       assert(add(2, 3) == 5);
+   On failure prints: Assertion `add(2, 3) == 5' failed. and aborts.
+   Good for quick checks where stopping at the first failure is fine.
+
+2. TEST macro — keeps running after failure, prints PASS or FAIL per
+   case. Write it once at the top of your test file:
+
+       #define TEST(condition) do { \
+           if (!(condition)) \
+               fprintf(stderr, "FAIL: %s  (line %d)\n", #condition, __LINE__); \
+           else \
+               fprintf(stdout, "PASS: %s\n", #condition); \
+       } while(0)
+
+   Usage is identical to assert:
+       TEST(add(2, 3) == 5);
+
+
+WHAT TO TEST
+-------------
+Every function needs at least these categories:
+
+1. Normal case     — typical valid input with known correct output.
+2. Edge cases      — empty string, zero, NULL pointer, single element,
+                     maximum value, minimum value.
+3. Error cases     — input that should return an error code or NULL.
+
+For functions that return pointers, always assert non-NULL before
+asserting on the contents. Dereferencing NULL in a test is just another
+bug on top of the original bug.
+
+For functions that allocate memory, free it after asserting. The
+interviewer is watching for this — it shows you understand ownership.
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+Use assert() for simple checks that stop at first failure, use a TEST
+macro when you want to see all failures at once, and always cover the
+normal case, edge cases, and error cases for every function.

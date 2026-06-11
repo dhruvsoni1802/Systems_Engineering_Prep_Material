@@ -1,0 +1,436 @@
+TOPICS — SIMPLE TECHNICAL EXPLANATIONS
+========================================
+These are concepts you need to explain confidently, not necessarily code.
+Each section is: what it is → how it works → one thing to say in the interview
+
+
+════════════════════════════════════════════
+1. CONTROL LOOPS
+════════════════════════════════════════════
+
+WHAT IT IS
+-----------
+A loop that runs forever, checks the state of something, and takes
+action to move it toward a desired state. Used everywhere in
+orchestration, monitoring, and infrastructure software.
+
+HOW IT WORKS
+-------------
+Three things every control loop has:
+
+  Desired state  — what you WANT  (vm should be running)
+  Actual state   — what IS        (vm is stopped)
+  Reconciliation — the action     (boot the vm)
+
+  while (running) {
+      actual  = observe();          // check what's actually happening
+      if (actual != desired)
+          reconcile(actual, desired); // take action to close the gap
+      sleep(interval);              // wait before checking again
+  }
+
+This is called a reconciliation loop. Kubernetes is built entirely
+on this pattern — every controller is just this loop for one resource type.
+
+WHAT TO SAY IN THE INTERVIEW
+------------------------------
+"A control loop continuously compares desired state to actual state
+and takes action to reconcile them. The VM orchestrator I'm building
+would run a loop that checks if each VM is in its expected state —
+if a VM should be running but isn't, the loop reboots it.
+This is the same pattern Kubernetes uses for every resource."
+
+
+════════════════════════════════════════════
+2. RPCs (REMOTE PROCEDURE CALLS)
+════════════════════════════════════════════
+
+WHAT IT IS
+-----------
+Making a function call that executes on a different machine.
+It looks like a local function call in your code but the arguments
+travel over a network and the result comes back the same way.
+
+HOW IT WORKS
+-------------
+  Client side:
+    1. Serialize the function name and arguments into bytes
+    2. Send those bytes over a TCP connection
+    3. Wait for response bytes
+    4. Deserialize response into a return value
+
+  Server side:
+    1. Receive bytes
+    2. Deserialize to find which function was called and with what args
+    3. Call that function locally
+    4. Serialize the return value and send it back
+
+  On the wire it looks like:
+    [ 4 bytes: message length ][ N bytes: serialized payload ]
+
+  The length prefix is called framing. TCP is a stream — no concept
+  of message boundaries. Without framing you don't know where one
+  message ends and the next begins.
+
+  Modern RPC frameworks (gRPC, Thrift) do all of this for you.
+  At the primitive level it's just: length-prefix + serialize + TCP.
+
+WHAT TO SAY IN THE INTERVIEW
+------------------------------
+"An RPC is a function call over a network. The core primitives are
+serialization (turning arguments into bytes), framing (prefixing
+each message with its length so the receiver knows boundaries),
+and a TCP connection. gRPC uses protobuf for serialization and
+HTTP/2 for transport but the underlying idea is identical.
+In the API server for this role, every user request to provision
+a VM is essentially an RPC to the orchestration layer."
+
+
+════════════════════════════════════════════
+3. VIRTUAL AND PHYSICAL MEMORY
+════════════════════════════════════════════
+
+WHAT IT IS
+-----------
+Every process thinks it has the entire address space to itself.
+That's an illusion the OS and CPU maintain together.
+Physical memory is the actual RAM chips. Virtual memory is what
+your process sees. The hardware maps between them.
+
+HOW IT WORKS
+-------------
+  Physical memory:
+    Actual RAM — say 16GB. Fixed. Shared by all processes.
+
+  Virtual address space:
+    Every process gets its own map — 0 to 2^64 on a 64-bit system.
+    Most of it is unmapped (touching it = segfault).
+
+  Page table:
+    A data structure the OS maintains per process.
+    Maps virtual page numbers → physical frame numbers.
+    The CPU's MMU (Memory Management Unit) does this translation
+    on every single memory access in hardware.
+
+    virtual address 0x7fff1000
+          ↓  (MMU looks up page table)
+    physical address 0x3a2b1000
+
+  Pages:
+    Memory is divided into fixed-size chunks called pages (usually 4KB).
+    You can't map less than one page. mmap always gives you whole pages.
+
+  Page fault:
+    You access a virtual address with no physical mapping.
+    CPU interrupts the kernel. Kernel either:
+      - Maps a physical page and resumes your process (normal fault)
+      - Sends SIGSEGV to your process (you accessed invalid memory)
+
+  Why this matters for the role:
+    mmap() creates a virtual mapping — no physical RAM is allocated yet.
+    Physical pages are only assigned when you actually touch them (fault).
+    This is how you can mmap a 10GB file on a 16GB machine without
+    loading the whole thing into RAM.
+
+WHAT TO SAY IN THE INTERVIEW
+------------------------------
+"Every process has its own virtual address space. The CPU's MMU
+translates virtual to physical addresses using the page table on
+every memory access. When you call mmap, the OS creates a virtual
+mapping but doesn't allocate physical RAM yet — that happens lazily
+on first access via a page fault. This is how VM memory works too:
+a guest OS has a virtual address space that the hypervisor maps to
+physical host memory through a second level of page tables."
+
+
+════════════════════════════════════════════
+4. CPU INTERRUPTS
+════════════════════════════════════════════
+
+WHAT IT IS
+-----------
+A signal from hardware to the CPU saying "stop what you're doing,
+something needs attention." The CPU pauses the current process,
+handles the interrupt, then resumes.
+
+HOW IT WORKS
+-------------
+  Two types:
+
+  Hardware interrupt:
+    NIC receives a packet → signals the CPU → kernel network driver runs
+    Disk read completes  → signals the CPU → kernel wakes waiting process
+    Timer fires          → signals the CPU → kernel runs the scheduler
+
+  Software interrupt (trap / syscall):
+    Your process calls read() → triggers a trap → CPU switches to kernel mode
+    Kernel executes the syscall → returns to your process
+
+  The sequence:
+    1. Interrupt fires
+    2. CPU saves current process state (registers, instruction pointer)
+       onto the kernel stack
+    3. CPU switches to kernel mode (ring 0)
+    4. Kernel runs the interrupt handler
+    5. CPU restores process state
+    6. Process resumes exactly where it was
+
+  Context switch:
+    When the scheduler runs (timer interrupt), it may decide to run
+    a different process. It saves one process's state and restores
+    another's. This is a context switch. Costs ~1-10 microseconds.
+
+WHAT TO SAY IN THE INTERVIEW
+------------------------------
+"Interrupts are how hardware talks to the CPU asynchronously.
+A network card receiving a packet doesn't wait — it interrupts the CPU,
+the kernel's NIC driver runs, and the data lands in the socket buffer.
+Your read() call either finds data already there or blocks until
+the next interrupt delivers it. In an event loop with epoll,
+we never block — we let epoll batch the notifications so we handle
+many interrupts' worth of data in one loop iteration."
+
+
+════════════════════════════════════════════
+5. TCP/IP STACK AND PACKET ROUTING
+════════════════════════════════════════════
+
+WHAT IT IS
+-----------
+The set of protocols that moves data between machines on a network.
+Four layers, each with one job.
+
+THE FOUR LAYERS
+----------------
+  Application layer  — your code (HTTP, gRPC, your custom protocol)
+  Transport layer    — TCP or UDP (ports, reliability, ordering)
+  Network layer      — IP (addressing, routing between machines)
+  Link layer         — Ethernet, WiFi (hop between adjacent devices)
+
+TCP — what you use for everything reliable
+-------------------------------------------
+  Connection-oriented: three-way handshake before any data
+    Client: SYN  →
+                  ← Server: SYN-ACK
+    Client: ACK  →
+    Connection established. Now data flows.
+
+  Stream protocol: no message boundaries
+    If you send("hello") then send("world"), the receiver might get
+    "helloworld" in one read or "hel" then "loworld" in two.
+    TCP does not preserve send boundaries. You must frame your messages.
+
+  Reliable: every byte is acknowledged. Lost packets are retransmitted.
+  Ordered: bytes arrive in the order they were sent.
+
+UDP — what you use when speed > reliability
+--------------------------------------------
+  No connection, no handshake, no acknowledgment.
+  Send a packet and forget. Might arrive, might not, might arrive twice.
+  Used for: DNS, video streaming, game state, anything with its own
+  retry logic or where stale data is worse than no data.
+
+PACKET ROUTING
+---------------
+  Your packet has a destination IP. Your machine doesn't know the route.
+
+  1. Is the destination on my local subnet?
+       YES → send directly via Ethernet (ARP to find MAC address)
+       NO  → send to the default gateway (your router)
+
+  2. Router looks at destination IP, consults its routing table,
+     forwards the packet to the next hop.
+
+  3. This repeats across many routers until the packet arrives.
+
+  In a data center:
+    All machines are on known subnets. Traffic goes through a
+    top-of-rack switch, then a spine switch, then to the destination.
+    VMs add a layer: guest traffic is encapsulated (VXLAN, GRE) and
+    the underlay network routes the outer packet.
+
+WHAT TO SAY IN THE INTERVIEW
+------------------------------
+"TCP gives you a reliable ordered byte stream — not messages.
+If you're building an RPC layer on top, you need to add framing:
+prefix every message with its length so the receiver knows boundaries.
+In the VM networking layer, guest packets are typically encapsulated
+in an overlay protocol like VXLAN so the physical network only sees
+the outer IP, and the virtual network topology is managed in software."
+
+
+════════════════════════════════════════════
+6. VIRTUAL MACHINES AND CONTAINERS
+════════════════════════════════════════════
+
+VIRTUAL MACHINES
+-----------------
+  A VM is a complete emulation of a physical machine running in software.
+  The hypervisor sits between the VM and the hardware.
+
+  Two types of hypervisor:
+    Type 1 (bare metal): runs directly on hardware — KVM, VMware ESXi, Xen
+    Type 2 (hosted):     runs on top of an OS — VirtualBox, VMware Workstation
+
+  What the VM gets:
+    Virtual CPUs (vCPUs) — scheduled on real CPUs by the hypervisor
+    Virtual RAM           — backed by real host physical pages
+    Virtual NIC           — packets go through a virtual switch
+    Virtual disk          — backed by a file on the host filesystem
+
+  KVM (Kernel-based Virtual Machine):
+    Linux kernel module that turns Linux into a Type 1 hypervisor.
+    Uses CPU hardware extensions (Intel VT-x, AMD-V) for near-native speed.
+    Guest OS runs in a special CPU mode — most instructions run directly
+    on hardware, only privileged instructions trap to KVM.
+
+  This is what the role builds on — provisioning VMs means:
+    allocating vCPUs and RAM, creating virtual NICs, attaching disk images,
+    and booting a guest OS inside the hypervisor.
+
+CONTAINERS
+-----------
+  A container is NOT a VM. It's a process with isolation.
+  No separate kernel — shares the host kernel.
+
+  Two Linux primitives make containers possible:
+
+  Namespaces — isolation
+    Each namespace type hides a different resource:
+    pid       → container has its own process tree (PID 1 is its init)
+    net       → container has its own network stack, IP address
+    mnt       → container has its own filesystem view
+    uts       → container has its own hostname
+    user      → container has its own user IDs
+
+  Cgroups — resource limits
+    Limit and account for resource usage per group of processes:
+    memory    → max RAM this container can use
+    cpu       → how much CPU time it gets
+    blkio     → disk I/O limits
+
+  Container vs VM:
+    VM:        full OS, separate kernel, strong isolation, slower to boot
+    Container: shared kernel, namespace isolation, lighter, boots in ms
+    Security:  VM boundary is harder to escape. Container escape = kernel bug.
+
+WHAT TO SAY IN THE INTERVIEW
+------------------------------
+"VMs give you hardware-level isolation — each VM has its own kernel,
+virtual CPUs, and virtual memory. KVM implements this by using CPU
+virtualization extensions so most guest instructions run natively.
+Containers are lighter — same kernel, just namespace and cgroup isolation.
+For a GPU compute rental platform, VMs make more sense than containers
+because tenants need strong isolation and direct hardware access
+via PCIe passthrough for the GPU."
+
+
+════════════════════════════════════════════
+7. BASIC ASSEMBLY
+════════════════════════════════════════════
+
+WHAT YOU NEED TO KNOW
+----------------------
+You won't write assembly in this interview. You need to know enough
+to read it and understand what's happening at the CPU level.
+
+THE CORE IDEA
+--------------
+Assembly is the human-readable form of machine code.
+One assembly instruction = one CPU operation.
+
+  Source code:    a + b
+  Assembly:       mov eax, [a]    ; load a into register eax
+                  add eax, [b]    ; add b to eax
+                  mov [result], eax ; store result
+
+REGISTERS
+----------
+Registers are the CPU's local variables — tiny, fast storage inside the chip.
+On x86-64:
+
+  rax, rbx, rcx, rdx  — general purpose
+  rsp                  — stack pointer (top of the call stack)
+  rbp                  — base pointer (bottom of current stack frame)
+  rip                  — instruction pointer (next instruction to execute)
+  rdi, rsi, rdx, rcx  — first four function arguments (calling convention)
+  rax                  — return value
+
+THE CALL STACK
+---------------
+  Each function call pushes a frame onto the stack:
+    - return address (where to go when function returns)
+    - saved registers
+    - local variables
+
+  push rbp        ; save caller's base pointer
+  mov rbp, rsp    ; set up our frame
+  sub rsp, 16     ; make room for local variables
+  ...
+  pop rbp         ; restore caller's frame
+  ret             ; jump to return address
+
+SYSCALLS IN ASSEMBLY
+---------------------
+  Syscalls are just a special instruction (syscall on x86-64).
+  Arguments go in registers by convention:
+    rax = syscall number
+    rdi = first argument
+    rsi = second argument
+    rdx = third argument
+
+  write(1, "hi", 2) in assembly:
+    mov rax, 1      ; syscall number for write
+    mov rdi, 1      ; fd = stdout
+    mov rsi, msg    ; pointer to "hi"
+    mov rdx, 2      ; length
+    syscall
+
+WHAT TO SAY IN THE INTERVIEW
+------------------------------
+"Assembly is one instruction per CPU operation. Function arguments
+go into registers rdi, rsi, rdx in order, return value comes back
+in rax. Syscalls work the same way — put the syscall number in rax
+and call the syscall instruction. Understanding this helps when
+reading crash dumps, performance profiles, or understanding why
+a context switch is expensive — the CPU has to save and restore
+all registers for the outgoing process."
+
+
+════════════════════════════════════════════
+THE ONE-PARAGRAPH VERSIONS (for quick recall)
+════════════════════════════════════════════
+
+Control loop:
+  A loop that observes actual state, compares to desired state, and
+  reconciles. Kubernetes is this pattern applied to every resource type.
+
+RPC:
+  Function call over a network. Serialize args → TCP → deserialize on
+  the other end → call function → serialize result → send back.
+  Frame every message with a length prefix because TCP has no boundaries.
+
+Virtual memory:
+  Every process sees its own address space. The MMU translates virtual
+  to physical on every access using the page table. mmap creates a
+  virtual mapping but physical RAM is only assigned on first touch.
+
+CPU interrupts:
+  Hardware signals the CPU asynchronously. CPU saves state, runs kernel
+  handler, restores state. Syscalls are software interrupts — your
+  read() is a trap into the kernel.
+
+TCP/IP:
+  Four layers. TCP = reliable ordered byte stream, no message boundaries,
+  needs framing. UDP = unreliable, no connection, fast. Routing = each
+  router forwards based on destination IP until packet arrives.
+
+VMs and containers:
+  VMs = full OS isolation, separate kernel, hypervisor manages vCPUs and
+  virtual hardware. Containers = same kernel, namespace + cgroup isolation,
+  lighter but weaker security boundary.
+
+Assembly:
+  One instruction per CPU op. Registers are CPU-local variables.
+  Function args in rdi/rsi/rdx, return value in rax. Syscalls put
+  syscall number in rax and execute the syscall instruction.
