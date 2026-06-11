@@ -1,0 +1,86 @@
+VM ORCHESTRATOR — What this code does and why
+==============================================
+
+THE PROBLEM IT SOLVES
+----------------------
+A VM orchestrator's job is to make reality match intent.
+User says "vm-1 should be running." The orchestrator figures out
+how to make that happen and keeps it that way — even if the VM crashes.
+
+
+THE BIG IDEA
+------------
+Two pieces working together:
+  State machine  — defines what states a VM can be in and what
+                   transitions are valid between them
+  Control loop   — runs forever, checks actual vs desired state,
+                   calls the state machine to reconcile differences
+
+
+THE STATE MACHINE
+------------------
+A VM moves through defined states. Not every transition is valid.
+
+  IDLE → BOOTING → RUNNING → STOPPING → STOPPED
+                       ↓           ↓
+                     ERROR       ERROR
+
+The transition() function is a switch statement on (current state, event).
+It returns the next state or stays put if the event is invalid.
+Invalid transitions are silently ignored — the state machine protects
+against impossible states.
+
+Events that drive transitions:
+  EV_BOOT   — user or orchestrator requested boot
+  EV_READY  — hypervisor reports VM is up
+  EV_STOP   — user requested stop
+  EV_DONE   — shutdown completed
+  EV_FAIL   — something went wrong
+
+This is called a finite state machine. Every VM, container, and
+provisioning step in real orchestrators is modeled this way.
+
+
+THE CONTROL LOOP
+-----------------
+Runs in its own thread. Every N seconds:
+  for each VM:
+      read actual state and desired state
+      if they differ → call reconcile()
+
+reconcile() looks at the gap and takes action:
+  desired=RUNNING, actual=IDLE    → send EV_BOOT, simulate boot
+  desired=RUNNING, actual=ERROR   → reset to IDLE, reboot
+  desired=STOPPED, actual=RUNNING → send EV_STOP, simulate stop
+  actual == desired               → do nothing
+
+This is exactly the reconciliation loop Kubernetes runs for every
+resource type — Deployment, Pod, Service. The controller just
+watches desired state (etcd) vs actual state (kubelet) and reconciles.
+
+
+WHY MUTEX ON EACH VM
+---------------------
+The control loop reads and writes vm->actual and vm->desired.
+The main thread also writes vm->desired (user request) and
+apply_event() writes vm->actual (transition result).
+Without a mutex these writes would race and corrupt the state.
+
+
+DESIRED STATE VS ACTUAL STATE
+-------------------------------
+These are kept separate intentionally.
+  desired — set by the user, never touched by the loop
+  actual  — changed only by transitions
+
+This separation means you can change desired at any time and the
+next reconcile pass will pick it up. No special "update" path needed.
+The loop always just looks at the current gap and closes it.
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+A state machine defines valid VM transitions, a control loop runs
+forever comparing actual to desired state and firing the right
+transitions to close the gap — this is the reconciliation pattern
+every orchestrator from Kubernetes to AWS uses.

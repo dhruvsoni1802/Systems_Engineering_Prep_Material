@@ -1,0 +1,115 @@
+TCP SERVER — What this code does and why
+=========================================
+
+THE PROBLEM IT SOLVES
+----------------------
+Clients on a network send commands to a server.
+The server parses each command and sends a response back.
+Multiple clients connect at the same time — each gets its own thread.
+
+
+THE BIG IDEA
+------------
+Three layers stacked on top of each other:
+  Framing    — solve TCP's boundary problem with a length prefix
+  Protocol   — parse text commands, build responses
+  Threading  — one thread per client, all running concurrently
+
+
+THE MOST IMPORTANT CONCEPT — FRAMING
+--------------------------------------
+TCP is a byte stream. No concept of message boundaries.
+
+If a client sends "SET vm-1 running" and then "GET vm-1",
+the server might read all of it in one shot, or split across
+two reads, or three. You never know. TCP does not preserve
+the boundaries of your send() calls.
+
+Fix: prefix every message with its 4-byte length.
+  [ 4 bytes: length ][ N bytes: payload ]
+
+send_msg(): write 4-byte length header, then write payload
+recv_msg(): read exactly 4 bytes to get length,
+            then loop reading until you have exactly that many bytes
+
+The while loop in recv_msg is critical.
+TCP can deliver a 100-byte message in 3 separate reads.
+Without the loop you'd return a partial message and corrupt everything.
+
+
+BYTE ORDER — htonl AND ntohl
+------------------------------
+The 4-byte length integer must be converted before sending.
+
+Different CPUs store multi-byte integers differently.
+x86 is little-endian: least significant byte stored first.
+Network standard is big-endian: most significant byte first.
+
+htonl() — host to network long: call this BEFORE sending
+ntohl() — network to host long: call this AFTER receiving
+
+Without this, the number 256 sent from an x86 machine
+would be read as a completely wrong value on a big-endian machine.
+Always convert integers that cross a network boundary.
+
+
+HOW handle_command WORKS
+--------------------------
+sscanf parses the message into three parts: cmd, key, val.
+strcmp checks which command it is.
+snprintf writes the response into the output buffer.
+Returns the response length so send_msg knows how many bytes to send.
+
+In production you'd back this with a real store.
+Say that out loud: "I'd add a mutex-protected key-value store here —
+same array-of-structs with pthread_mutex I've used elsewhere."
+
+
+THREAD PER CLIENT
+------------------
+For every accepted connection:
+  1. malloc a new int to hold the fd
+  2. pass it to a new thread
+  3. detach the thread — it cleans itself up when done
+
+Why malloc and not pass &client_fd directly?
+  client_fd lives on main's stack. The next loop iteration
+  overwrites it before the thread reads it — race condition.
+  Heap allocation gives each thread its own private copy.
+
+pthread_detach() means we never call pthread_join().
+The thread frees its own resources when it returns.
+Without detach, finished threads accumulate as zombies.
+
+
+THE ACCEPT LOOP
+----------------
+socket()     — create the endpoint
+setsockopt() — SO_REUSEADDR avoids "address already in use" on restart
+bind()       — attach to PORT on all interfaces
+listen()     — mark as passive, queue up to 128 pending connections
+accept()     — block until a client connects, return new fd
+
+The listen fd never goes away. It stays open for new connections.
+The client fd is what you read and write on. One per client.
+
+
+WHAT TO SAY ABOUT WHAT'S MISSING
+----------------------------------
+"handle_command echoes back right now. In production I'd back it
+with a mutex-protected key-value store."
+
+"I'd add proper error handling on write() — it can send fewer bytes
+than requested and needs a loop in production."
+
+"For high concurrency I'd replace thread-per-client with an epoll
+event loop — the reactor pattern. Thread-per-client works fine
+up to a few hundred clients, then the thread overhead adds up."
+
+
+THE ONE SENTENCE SUMMARY
+-------------------------
+Prefix every message with a 4-byte length to solve TCP's boundary
+problem, parse commands in the handler, give each client its own
+thread with a heap-allocated fd — this is the skeleton of every
+real network service.
